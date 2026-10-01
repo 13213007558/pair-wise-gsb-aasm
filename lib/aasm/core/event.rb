@@ -137,29 +137,44 @@ module AASM::Core
 
       if to_state == ::AASM::NO_VALUE
         to_state = nil
-      elsif !(to_state.respond_to?(:to_sym) && transitions.map(&:to).flatten.include?(to_state.to_sym))
+      elsif !(to_state.respond_to?(:to_sym) && transitions.flat_map(&:to).include?(to_state.to_sym))
         # to_state is an argument
         args.unshift(to_state)
         to_state = nil
       end
-      
+
       # nop, to_state is a valid to-state
 
       transitions.each do |transition|
         next if to_state and !Array(transition.to).include?(to_state)
-        if (options.key?(:may_fire) && transition.eql?(options[:may_fire])) ||
-           (!options.key?(:may_fire) && transition.allowed?(obj, *args))
 
-          if options[:test_only]
-            result = transition
-          else
-            result = to_state || Array(transition.to).first
-            Array(transition.to).each {|to| @valid_transitions[obj.object_id][to] = transition }
-            transition.execute(obj, *args)
-          end
+        selection = options[:may_fire] if options.key?(:may_fire)
+        selected = if selection.is_a?(AASM::Core::Transition::Selection)
+                     selection.transition.equal?(transition)
+                   elsif selection
+                     transition.eql?(selection)
+                   end
+        next if selection && !selected
+        next unless selected || transition.allowed?(obj, *args)
 
-          break
+        target = if selection.is_a?(AASM::Core::Transition::Selection)
+                   selection.target
+                 elsif transition.dynamic?
+                   transition.select_target(obj, *args)
+                 else
+                   to_state || Array(transition.to).first
+                 end
+        next if to_state && target != to_state
+
+        if options[:test_only]
+          result = transition.dynamic? ? AASM::Core::Transition::Selection.new(transition, target) : transition
+        else
+          result = target
+          Array(transition.to).each {|to| @valid_transitions[obj.object_id][to] = transition }
+          transition.execute(obj, *args)
         end
+
+        break
       end
       result
     end
@@ -174,5 +189,6 @@ module AASM::Core
              .with_default_return_value(false)
              .invoke
     end
+    ruby2_keywords :may_fire?, :fire, :_fire if respond_to?(:ruby2_keywords, true)
   end
 end # AASM

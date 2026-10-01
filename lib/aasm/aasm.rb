@@ -121,6 +121,7 @@ private
       event.fire_global_callbacks(:ensure_on_all_events, self, *process_args(event, aasm(state_machine_name).current_state, *args))
     end
   end
+  ruby2_keywords :aasm_fire_event if respond_to?(:ruby2_keywords, true)
 
   def fire_default_callbacks(event, *processed_args)
     event.fire_global_callbacks(

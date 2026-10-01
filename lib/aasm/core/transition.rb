@@ -4,6 +4,13 @@ module AASM::Core
   class Transition
     include AASM::DslHelper
 
+    Selection = Struct.new(:transition, :target) do
+      def eql?(other)
+        other.equal?(transition) || super
+      end
+      alias_method :==, :eql?
+    end
+
     attr_reader :from, :to, :event, :opts, :failures
     alias_method :options, :opts
 
@@ -13,6 +20,7 @@ module AASM::Core
       @event = event
       @from = opts[:from]
       @to = opts[:to]
+      @resolver = opts[:resolver]
       @guards = Array(opts[:guards]) + Array(opts[:guard]) + Array(opts[:if])
       @unless = Array(opts[:unless]) #TODO: This could use a better name
       @failures = []
@@ -28,6 +36,21 @@ module AASM::Core
       @success = @success[0] if @success.size == 1
 
       @opts = opts
+    end
+
+    def dynamic?
+      !@resolver.nil?
+    end
+
+    def select_target(obj, *args)
+      target = Invoker.new(@resolver, obj, args).invoke
+      target = target.to_sym if target.respond_to?(:to_sym)
+
+      unless target.is_a?(Symbol) && Array(@to).include?(target)
+        raise ArgumentError, "Dynamic transition target #{target.inspect} is not one of #{Array(@to).map(&:inspect).join(', ')}"
+      end
+
+      target
     end
 
     # called internally by Ruby 1.9 after clone()

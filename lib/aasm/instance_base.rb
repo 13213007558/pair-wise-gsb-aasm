@@ -149,5 +149,6 @@ module AASM
       event_error = bang ? "#{event_name}!" : event_name
       raise AASM::UndefinedEvent, "Event :#{event_error} doesn't exist" if event.nil?
     end
+    ruby2_keywords :may_fire_event?, :fire, :fire! if respond_to?(:ruby2_keywords, true)
   end
 end
