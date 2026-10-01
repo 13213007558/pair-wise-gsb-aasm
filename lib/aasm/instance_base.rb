@@ -124,6 +124,49 @@ module AASM
       @instance.send(bang_event_name, *args, &block)
     end
 
+    def fire_with_receipt(event_name, event_id, *args, persist:, store: nil, wait: true, **keyword_arguments, &block)
+      event_exists?(event_name, persist)
+
+      receipt_store = store || event_receipt_store
+      request = AASM::EventReceipt::Request.new(
+        event_id: event_id,
+        event_name: event_name,
+        state_machine_name: @name,
+        persist: persist,
+        arguments: args,
+        keyword_arguments: keyword_arguments,
+        block_source: block&.source_location
+      )
+      receipt_key = [@instance.class, @instance.object_id, @name, event_id]
+      admission, receipt = receipt_store.admit(receipt_key, request)
+
+      loop do
+        case admission
+        when :accepted
+          return fire_accepted_event_with_receipt(event_name, receipt_store, receipt, persist, args, keyword_arguments, &block)
+        when :duplicate
+          return receipt unless wait
+
+          receipt_store.wait(receipt)
+          current_receipt = receipt_store.fetch(receipt_key)
+          return current_receipt if current_receipt
+
+          admission, receipt = receipt_store.admit(receipt_key, request)
+        when :conflict
+          return receipt
+        end
+      end
+    end
+
+    def fire_with_receipt!(event_name, event_id, *args, store: nil, wait: true, **keyword_arguments, &block)
+      fire_with_receipt(event_name, event_id, *args, persist: true, store: store, wait: wait, **keyword_arguments, &block)
+    end
+
+    def find_event_receipt(event_id, store: nil)
+      receipt_key = [@instance.class, @instance.object_id, @name, event_id]
+      (store || event_receipt_store).fetch(receipt_key)
+    end
+
     def set_current_state_with_persistence(state)
       save_success = @instance.aasm_write_state(state, @name)
       self.current_state = state if save_success
@@ -131,6 +174,33 @@ module AASM
     end
 
     private
+
+    def event_receipt_store
+      @instance.class.aasm(@name).state_machine.config.event_receipt_store
+    end
+
+    def fire_accepted_event_with_receipt(event_name, receipt_store, receipt, persist, arguments, keyword_arguments, &block)
+      options = {
+        :persist => persist,
+        :event_receipt => receipt,
+        :event_receipt_store => receipt_store,
+        :event_receipt_commit_on_success => true,
+      }
+      result = @instance.send(:aasm_fire_event, @name, event_name.to_sym, options, *arguments, **keyword_arguments, &block)
+
+      if receipt.executing?
+        result ? receipt_store.commit(receipt, result) : receipt_store.reject(receipt, result)
+      end
+
+      receipt
+    rescue AASM::InvalidTransition => error
+      receipt_store.reject(receipt, false, error) if receipt.executing?
+      receipt
+    rescue StandardError => error
+      return receipt if receipt.post_commit_callback_failed?
+      receipt_store.abort(receipt)
+      raise error
+    end
 
     def event_method_name(event_name)
       config = @instance.class.aasm(@name).state_machine.config

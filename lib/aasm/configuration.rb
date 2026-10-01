@@ -41,6 +41,9 @@ module AASM
     # Configure a logger, with default being a Logger to STDERR
     attr_accessor :logger
 
+    # Optional store used by event receipt APIs
+    attr_accessor :event_receipt_store
+
     class << self
       attr_accessor :hide_warnings
     end

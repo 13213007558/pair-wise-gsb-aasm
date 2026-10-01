@@ -12,6 +12,7 @@
   - [Callbacks](#callbacks)
     - [Lifecycle](#lifecycle)
     - [The current event triggered](#the-current-event-triggered)
+  - [Event receipts](#event-receipts)
   - [Guards](#guards)
   - [Transitions](#transitions)
   - [Multiple state machines per class](#multiple-state-machines-per-class)
@@ -827,6 +828,46 @@ job = Job.create
 job.aasm_state # => 'sleeping'
 job.aasm_state = :running # => raises AASM::NoDirectAssignmentError
 job.aasm_state # => 'sleeping'
+```
+
+### Event receipts
+
+Use an explicit event receipt when a message can be redelivered. The receipt key
+is scoped to the object and state machine. The digest is bound to the event name,
+persistence mode, positional arguments, keyword arguments, and block source
+location. Reusing the same `event_id` with a different input reports a conflict
+and does not execute the event.
+
+```ruby
+receipt = job.aasm.fire_with_receipt!(:run, message_id, reason: "retry")
+receipt.status
+# :not_accepted - rejected because the transition was not allowed or the input conflicts
+# :executing     - another identical call currently owns the execution
+# :committed     - the transition completed and returned true
+# :post_commit_callback_failed - committed, but an after_commit callback raised
+
+receipt.result    # first event result
+receipt.error     # InvalidTransition, EventReceipt::Conflict, or after_commit error
+receipt.wait      # wait for an in-flight identical call to finish
+
+# Return immediately while the first call is still executing:
+job.aasm.fire_with_receipt!(:run, message_id, reason: "retry", wait: false)
+
+# Non-persisting form, equivalent to job.run:
+job.aasm.fire_with_receipt(:run, message_id, reason: "retry", persist: false)
+```
+
+A thread-safe in-memory store is enabled by default. Pass another store for a
+single call or configure one for the state machine when integrating another
+backend. A store must implement `admit`, `wait`, `commit`,
+`mark_post_commit_callback_failed`, `reject`, `abort`, and `fetch`. The
+provided `AASM::EventReceipt::MemoryStore` is intended for tests and single
+process use; it does not provide durable cross-process deduplication.
+
+```ruby
+store = AASM::EventReceipt::MemoryStore.new
+job.aasm.fire_with_receipt!(:run, message_id, store: store)
+job.aasm.find_event_receipt(message_id, store: store)
 ```
 
 ### Timestamps

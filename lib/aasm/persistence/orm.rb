@@ -123,6 +123,9 @@ module AASM
         return super unless aasm_supports_transactions? && options[:persist]
 
         event = self.class.aasm(state_machine_name).state_machine.events[name]
+        event_receipt = options[:event_receipt]
+        event_receipt_store = options[:event_receipt_store]
+        options[:event_receipt_commit_on_success] = false
         event.fire_callbacks(:before_transaction, self, *args)
         event.fire_global_callbacks(:before_all_transactions, self, *args)
 
@@ -137,10 +140,17 @@ module AASM
 
           if success && !(event.options.keys & [:after_commit, :after_all_commits]).empty?
             aasm_execute_after_commit do
-              event.fire_callbacks(:after_commit, self, *args)
-              event.fire_global_callbacks(:after_all_commits, self, *args)
+              begin
+                event.fire_callbacks(:after_commit, self, *args)
+                event.fire_global_callbacks(:after_all_commits, self, *args)
+              rescue StandardError => error
+                event_receipt_store.mark_post_commit_callback_failed(event_receipt, success, error) if event_receipt
+                raise unless event_receipt
+              end
             end
           end
+
+          event_receipt_store.commit(event_receipt, success) if success && event_receipt
 
           success
         ensure

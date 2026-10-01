@@ -54,6 +54,9 @@ module AASM
       # Configure a logger, with default being a Logger to STDERR
       configure :logger, Logger.new(STDERR)
 
+      # Store idempotent event receipts in memory by default
+      configure :event_receipt_store, AASM::EventReceipt::MemoryStore.new
+
       # setup timestamp-setting callback if enabled
       setup_timestamps(@name)
 

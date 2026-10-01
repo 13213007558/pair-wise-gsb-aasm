@@ -96,6 +96,7 @@ private
 
   def aasm_fire_event(state_machine_name, event_name, options, *args, &block)
     event = self.class.aasm(state_machine_name).state_machine.events[event_name]
+    event_receipt = options[:event_receipt]
     begin
       old_state = aasm(state_machine_name).state_object_for_name(aasm(state_machine_name).current_state)
 
@@ -104,7 +105,9 @@ private
       if may_fire_to = event.may_fire?(self, *args)
         fire_exit_callbacks(old_state, *process_args(event, aasm(state_machine_name).current_state, *args))
         if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
-          aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
+          result = aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
+          event_receipt.mark_rejected(result) if !result && event_receipt&.executing?
+          result
         else
           aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
         end
@@ -144,6 +147,8 @@ private
 
   def aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args)
     persist = options[:persist]
+    event_receipt = options[:event_receipt]
+    commit_receipt_on_success = options.fetch(:event_receipt_commit_on_success, true)
 
     new_state = aasm(state_machine_name).state_object_for_name(new_state_name)
     callback_args = process_args(event, aasm(state_machine_name).current_state, *args)
@@ -188,6 +193,10 @@ private
       self.aasm_event_fired(event.name, old_state.name, aasm(state_machine_name).current_state) if self.respond_to?(:aasm_event_fired)
     else
       self.aasm_event_failed(event.name, old_state.name) if self.respond_to?(:aasm_event_failed)
+    end
+
+    if event_receipt && commit_receipt_on_success
+      persist_successful ? event_receipt.mark_committed(persist_successful) : event_receipt.mark_rejected(persist_successful)
     end
 
     persist_successful
