@@ -44,6 +44,20 @@ module AASM::Core
       invoke_callbacks_compatible_with_guard(@unless, obj, args, :unless => true)
     end
 
+    # Read-only access to the positive guards attached to this transition.
+    #
+    # This is used by the static, read-only analysis support (see
+    # AASM::Analysis) and never invokes the guards themselves.
+    def guards
+      @guards
+    end
+
+    # Read-only access to the negated (:unless) guards attached to this
+    # transition. This never invokes the guards.
+    def unless_guards
+      @unless
+    end
+
     def execute(obj, *args)
       invoke_callbacks_compatible_with_guard(event.state_machine.global_callbacks[:after_all_transitions], obj, args)
       invoke_callbacks_compatible_with_guard(@after, obj, args)

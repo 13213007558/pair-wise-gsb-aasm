@@ -38,6 +38,7 @@
   - [RubyMotion support](#rubymotion-support)
   - [Testing](#testing)
     - [RSpec](#rspec)
+    - [Read-only state analysis](#read-only-state-analysis)
     - [Minitest](#minitest)
       - [Assertions](#assertions)
       - [Expectations](#expectations)
@@ -1348,6 +1349,110 @@ expect(multiple).to_not allow_transition_to(:sleeping).on(:move)
 # allow_event also accepts arguments
 expect(job).to allow_event(:run).with(:defragmentation)
 
+```
+
+#### Read-only state analysis
+
+For design-time checks like *"an order can never be shipped while unpaid"*,
+AASM ships with a read-only, finite-state analyzer. It never instantiates your
+class, never fires events and never runs Ruby callbacks. Instead it builds a
+finite abstract model, interprets guards through the finite, side-effect free
+conditions you declare, explores every state combination reachable from the
+initial states and checks invariants. It supports one or several named state
+machines on the same object.
+
+```ruby
+class Order
+  include AASM
+  aasm do
+    state :unpaid, initial: true
+    state :paid
+    state :shipped
+
+    event :pay do
+      transitions from: :unpaid, to: :paid
+    end
+
+    event :ship do
+      transitions from: :unpaid, to: :shipped, guard: :paid?
+      transitions from: :paid,   to: :shipped
+    end
+  end
+
+  def paid?; paid_amount && paid_amount > 0; end
+end
+
+result = AASM::Analysis.analyze(Order) do |model|
+  # A finite abstract variable representing the guard's data dependency.
+  model.variable :paid, values: [true, false], initial: false
+
+  # A finite, side-effect free condition that abstracts the :paid? guard.
+  model.condition(:paid?) { |ctx| ctx.var(:paid) }
+
+  # How an event changes the abstract variables. Variables persist across
+  # events unless an effect assigns them.
+  model.effect(:pay) { |_ctx| { paid: true } }
+
+  # The finite-state invariant to verify.
+  model.invariant('never shipped while unpaid') do |ctx|
+    !(ctx.state == :shipped && ctx.var(:paid) == false)
+  end
+end
+
+result.safe?        # => true
+result.incomplete?  # => false
+```
+
+The result is always one of:
+
+* `result.safe?` - the whole reachable state space was explored and every
+  reachable combination satisfies every invariant.
+* `result.violation?` - a reachable combination breaks an invariant;
+  `result.events` is a **shortest** event sequence witnessing it.
+* `result.incomplete?` - the abstract model could not fully cover the concrete
+  definition, so safety is never claimed. Inspect `result.blockers`.
+
+When a violation is found, the witness is replayed purely against the abstract
+model (guards re-evaluated and AASM's first-match transition ordering applied)
+to guarantee it really lands on a violating combination:
+
+```ruby
+result.events   # => [:ship]
+result.replay!  # => { states: { default: :shipped },
+                #      variables: { paid: false },
+                #      invariant: 'never shipped while unpaid' }
+```
+
+Declaring conditions:
+
+* `model.condition(:method_name) { |ctx| ... }` abstracts a Symbol/String guard.
+* Pass the Proc/Class object itself to abstract proc or class guards.
+* `:unless` guards use the same conditions (a truthy condition blocks them).
+
+The analysis deliberately returns `:incomplete` rather than claiming safety
+when it cannot model the code:
+
+* a reachable guard (Proc, class or method) has no declared condition,
+* the initial state is dynamic (a Proc),
+* an event uses `:binding_event` (it auto-fires another event in Ruby),
+* the state space exceeds the combination budget.
+
+```ruby
+result = AASM::Analysis.analyze(Order, budget: 500) do |model|
+  model.invariant('...') { |ctx| ... }
+end
+result.blockers # e.g. [{ reason: :budget_exceeded, details: [500] }]
+```
+
+For multiple named machines, read states per machine and optionally restrict
+which machines participate:
+
+```ruby
+AASM::Analysis.analyze(Shipment, machine_names: %i[payment logistics]) do |model|
+  model.invariant('never shipped while unpaid') do |ctx|
+    !(ctx.state(:logistics) == :shipped && ctx.state(:payment) == :unpaid)
+  end
+end
 ```
 
 #### Minitest

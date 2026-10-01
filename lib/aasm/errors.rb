@@ -19,4 +19,12 @@ module AASM
   class UndefinedState < RuntimeError; end
   class UndefinedEvent < UndefinedState; end
   class NoDirectAssignmentError < RuntimeError; end
+
+  # Raised by the read-only analysis support
+  class AnalysisError < RuntimeError; end
+  class NoStateMachines < AnalysisError; end
+  class UnknownVariable < AnalysisError; end
+  class UnknownStateMachine < AnalysisError; end
+  class AmbiguousEventEffect < AnalysisError; end
+  class ReplayMismatch < AnalysisError; end
 end
