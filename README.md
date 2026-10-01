@@ -34,6 +34,7 @@
   - [Column name & migration](#column-name--migration)
   - [Log State Changes](#log-state-changes)
   - [Inspection](#inspection)
+  - [Static analysis of state combinations](#static-analysis-of-state-combinations)
   - [Warning output](#warning-output)
   - [RubyMotion support](#rubymotion-support)
   - [Testing](#testing)
@@ -1269,6 +1270,71 @@ Job.aasm.states_for_select
 job.aasm.states({permitted: true}, guard_parameter).map(&:name)
 ```
 
+
+### Static analysis of state combinations
+
+AASM ships a read-only analyzer (`AASM::Analyzer`) that can prove -- or refute --
+invariants over the combined states of one or several named state machines of a
+class, e.g. "an order can never be `shipped` while it is `unpaid`". The analyzer
+never instantiates the class and never fires real events; it explores the finite
+product of the declared state machines starting from their initial states.
+
+Since guards are arbitrary Ruby callbacks, every guard (and `unless` condition)
+that takes part in the analysis must be given a finite, side-effect-free
+*abstract condition*: a pure function from the state combination to a boolean.
+
+```ruby
+class Order
+  include AASM
+
+  aasm :payment do
+    state :unpaid, initial: true
+    state :paid
+    event :pay do
+      transitions from: :unpaid, to: :paid
+    end
+  end
+
+  aasm :shipment do
+    state :pending, initial: true
+    state :shipped
+    event :ship, guard: :paid? do
+      transitions from: :pending, to: :shipped
+    end
+  end
+
+  def paid?
+    aasm(:payment).current_state == :paid
+  end
+end
+
+analyzer = AASM::Analyzer.new(Order)
+analyzer.abstract_condition(:paid?) { |combo| combo[:payment] == :paid }
+analyzer.invariant('never shipped while unpaid') do |combo|
+  !(combo[:shipment] == :shipped && combo[:payment] == :unpaid)
+end
+
+result = analyzer.check
+result.status # => :safe, :violated or :incomplete
+```
+
+The result is three-valued:
+
+* `:safe` -- every reachable combination satisfies all invariants.
+* `:violated` -- an invariant is violated. `result.trace` contains the shortest
+  event sequence leading to the violation (as `{ machine:, event: }` steps), and
+  `result.combination` the offending combination. The trace is replayed in the
+  abstract model and only reported when it really ends in a violating
+  combination; you can replay it yourself with `analyzer.replay(result.trace)`.
+* `:incomplete` -- the analysis could not decide, so safety is *not* guaranteed.
+  `result.reason` tells you why: `:unabstracted_callback` (a guard without an
+  abstract condition was met, see `result.unabstracted_callbacks`),
+  `:state_budget_exceeded` (more combinations than the budget, configurable via
+  `AASM::Analyzer.new(Klass, state_budget: ...)` or `check(state_budget: ...)`),
+  or `:unsupported_initial_state`.
+
+Abstract conditions can be keyed by method name (Symbol or String) or by the
+exact Proc object used in the state machine definition.
 
 ### Warning output
 
