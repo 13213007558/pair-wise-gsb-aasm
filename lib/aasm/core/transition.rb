@@ -8,7 +8,7 @@ module AASM::Core
     alias_method :options, :opts
 
     def initialize(event, opts, &block)
-      add_options_from_dsl(opts, [:on_transition, :guard, :after, :success], &block) if block
+      add_options_from_dsl(opts, [:on_transition, :guard, :after, :success, :around_transition], &block) if block
 
       @event = event
       @from = opts[:from]

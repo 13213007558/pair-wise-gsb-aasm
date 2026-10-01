@@ -36,7 +36,24 @@ module AASM
         options = args[0] || {}
       end
 
-      AASM::StateMachineStore.fetch(self, true).register(state_machine_name, AASM::StateMachine.new(state_machine_name))
+      inherited_machine = nil
+      if self.superclass.respond_to?(:aasm)
+        inherited_machine = begin
+          AASM::StateMachineStore.fetch(self.superclass, true)&.machine(state_machine_name)
+        rescue AASM::UnknownStateMachineError
+          nil
+        end
+        if inherited_machine && !AASM::StateMachineStore.fetch(self, true).machine(state_machine_name)
+          AASM::StateMachineStore.fetch(self, true).register(
+            state_machine_name,
+            inherited_machine.clone,
+            true
+          )
+        end
+      end
+      unless inherited_machine
+        AASM::StateMachineStore.fetch(self, true).register(state_machine_name, AASM::StateMachine.new(state_machine_name))
+      end
 
       # use a default despite the DSL configuration default.
       # this is because configuration hasn't been setup for the AASM class but we are accessing a DSL option already for the class.
@@ -45,21 +62,23 @@ module AASM
       raise ArgumentError, "The class #{aasm_klass} must inherit from AASM::Base!" unless aasm_klass.ancestors.include?(AASM::Base)
 
       @aasm ||= Concurrent::Map.new
-      if @aasm[state_machine_name]
+      existing_base = @aasm[state_machine_name]
+      current_machine = AASM::StateMachineStore.fetch(self, true).machine(state_machine_name)
+      if existing_base && existing_base.state_machine.equal?(current_machine)
         # make sure to use provided options
         options.each do |key, value|
-          @aasm[state_machine_name].state_machine.config.send("#{key}=", value)
+          existing_base.state_machine.config.send("#{key}=", value)
         end
       else
         # create a new base
         @aasm[state_machine_name] = aasm_klass.new(
           self,
           state_machine_name,
-          AASM::StateMachineStore.fetch(self, true).machine(state_machine_name),
+          current_machine,
           options
         )
       end
-      @aasm[state_machine_name].instance_eval(&block) if block # new DSL
+      (@aasm[state_machine_name] || existing_base).instance_eval(&block) if block # new DSL
       @aasm[state_machine_name]
     end
   end # ClassMethods
@@ -103,10 +122,13 @@ private
 
       if may_fire_to = event.may_fire?(self, *args)
         fire_exit_callbacks(old_state, *process_args(event, aasm(state_machine_name).current_state, *args))
-        if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
-          aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
-        else
-          aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
+        callback_args = process_args(event, aasm(state_machine_name).current_state, *args)
+        event.execute_around_transitions(self, may_fire_to, callback_args) do
+          if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
+            aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
+          else
+            aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
+          end
         end
       else
         aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)

@@ -271,6 +271,9 @@ begin
   event           before
   event           guards
   transition      guards
+  global          around_transition before proceed
+    event         around_transition before proceed
+      transition   around_transition before proceed
   old_state       before_exit
   old_state       exit
                   after_all_transitions
@@ -284,6 +287,9 @@ begin
   old_state       after_exit
   new_state       after_enter
   event           after
+      transition   around_transition after proceed
+    event         around_transition after proceed
+  global          around_transition after proceed
   event           after_all_events
 rescue
   event           error
@@ -295,6 +301,20 @@ end
 ```
 
 Use event's `after_commit` callback if it should be fired after database update.
+
+`around_transition` callbacks receive a controlled `proceed` object. Call `proceed.call`
+at most once to continue with the transition; not calling it cancels the transition.
+Use `proceed.committed?` in a `rescue` block to distinguish failures raised before the
+state was written from failures raised after the transition was committed.
+
+```ruby
+around_transition do |proceed|
+  started_at = Time.now
+  proceed.call
+ensure
+  audit(proceed.committed?, Time.now - started_at)
+end
+```
 
 #### The current event triggered
 

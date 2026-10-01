@@ -18,8 +18,17 @@ module AASM
       super
       @states = orig.states.collect { |state| state.clone }
       @events = {}
-      orig.events.each_pair { |name, event| @events[name] = event.clone }
-      @global_callbacks = @global_callbacks.dup
+      orig.events.each_pair do |name, event|
+        @events[name] = event.clone.tap do |cloned_event|
+          cloned_event.instance_variable_set(:@state_machine, self)
+          cloned_event.transitions.each do |transition|
+            transition.instance_variable_set(:@event, cloned_event)
+          end
+        end
+      end
+      @global_callbacks = orig.global_callbacks.each_with_object({}) do |(name, callbacks), copy|
+        copy[name] = callbacks.is_a?(Array) ? callbacks.dup : callbacks.dup
+      end
     end
 
     def add_state(state_name, klass, options)

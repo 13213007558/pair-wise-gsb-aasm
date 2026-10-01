@@ -21,6 +21,7 @@ module AASM::Core
         :after,
         :after_commit,
         :after_transaction,
+        :around_transition,
         :before,
         :before_transaction,
         :ensure,
@@ -82,6 +83,22 @@ module AASM::Core
       transition = @valid_transitions[obj.object_id][from_state]
       transition.invoke_success_callbacks(obj, *args) if transition
       @valid_transitions.delete(obj.object_id)
+    end
+
+    def execute_around_transitions(obj, transition, args, &core)
+      callbacks = around_transition_callbacks(transition)
+      return core.call if callbacks.empty?
+
+      from_state = obj.aasm(state_machine.name).current_state
+      AASM::Core::AroundTransition.invoke(
+        callbacks,
+        obj,
+        args,
+        self,
+        from_state,
+        transition.to,
+        &core
+      )
     end
 
     def ==(event)
@@ -173,6 +190,12 @@ module AASM::Core
       Invoker.new(code, record, args)
              .with_default_return_value(false)
              .invoke
+    end
+
+    def around_transition_callbacks(transition)
+      Array(state_machine.global_callbacks[:around_transition]) +
+        Array(@options[:around_transition]) +
+        Array(transition.options[:around_transition])
     end
   end
 end # AASM
