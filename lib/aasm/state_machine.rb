@@ -19,7 +19,9 @@ module AASM
       @states = orig.states.collect { |state| state.clone }
       @events = {}
       orig.events.each_pair { |name, event| @events[name] = event.clone }
-      @global_callbacks = @global_callbacks.dup
+      # deep-dup so callbacks added on a subclass state machine (created via
+      # clone during inheritance) never mutate the parent machine
+      @global_callbacks = Hash[orig.global_callbacks.map { |name, callbacks| [name, callbacks.dup] }]
     end
 
     def add_state(state_name, klass, options)

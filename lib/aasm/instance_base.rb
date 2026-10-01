@@ -1,6 +1,16 @@
 module AASM
   class InstanceBase
-    attr_accessor :from_state, :to_state, :current_event
+    attr_accessor :from_state, :to_state
+
+    # The event currently being fired. Kept as a stack so an event fired
+    # reentrantly from inside a callback restores the outer event context.
+    def current_event
+      @event_stack&.last
+    end
+
+    def current_event=(event_name)
+      @event_stack = [event_name]
+    end
 
     def initialize(instance, name=:default) # instance of the class including AASM, name of the state machine
       @instance = instance
@@ -128,6 +138,18 @@ module AASM
       save_success = @instance.aasm_write_state(state, @name)
       self.current_state = state if save_success
       save_success
+    end
+
+    # Runs the block with the event on top of the context stack. A reentrant
+    # event pushes a new frame which is removed afterwards; the outermost frame
+    # is retained so current_event keeps reporting the last fired event.
+    def with_event(event_name)
+      @event_stack ||= []
+      @event_stack.push(event_name)
+      nested = @event_stack.size > 1
+      yield
+    ensure
+      @event_stack.pop if nested
     end
 
     private

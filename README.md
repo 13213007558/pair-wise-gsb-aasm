@@ -271,6 +271,9 @@ begin
   event           before
   event           guards
   transition      guards
+  around          around_all_transitions (outermost)
+  around          event around_transition
+  around          transition around_transition (innermost)
   old_state       before_exit
   old_state       exit
                   after_all_transitions
@@ -295,6 +298,72 @@ end
 ```
 
 Use event's `after_commit` callback if it should be fired after database update.
+
+#### Around transitions
+
+When you need to run logic *both before and after* a single transition while
+sharing local state (timing, audit context, correlation ids, ...) an
+`around_transition` callback is more convenient than splitting the work into
+`before` and `after` callbacks. Around callbacks wrap the transition in nested
+layers and receive a controlled `proceed` callable as their first argument
+(followed by the event arguments). The transition only happens when the
+callback invokes `proceed.call`:
+
+```ruby
+class Job
+  include AASM
+
+  aasm do
+    state :sleeping, initial: true
+    state :running
+
+    # global, applies to every transition of this state machine
+    around_all_transitions :audit_all_transitions
+
+    event :run do
+      # event level
+      transitions from: :sleeping, to: :running,
+        around_transition: :time_transition
+    end
+  end
+
+  def time_transition(proceed, *args)
+    started = Time.now
+    proceed.call                 # runs the inner layers and the transition
+    logger.info "run took #{Time.now - started} seconds"
+  end
+
+  def audit_all_transitions(proceed, *args)
+    CurrentContext.with(audit: true) { proceed.call }
+  end
+end
+```
+
+Around callbacks can be registered at three scopes, executed outermost first:
+
+1. `around_all_transitions` (global, in the order registered)
+2. the event's `around_transition` option
+3. the transition's `around_transition` option
+
+Rules:
+
+* `proceed` may be called **at most once**. Calling it again raises
+  `AASM::DoubleProceedError`; the transition is never executed twice and the
+  state is written exactly once.
+* Not calling `proceed` **cancels** the transition: the state is not changed,
+  no success callbacks fire, and the event method returns `false`. This is a
+  deliberate cancellation, distinct from a guard rejection (which raises
+  `AASM::InvalidTransition` when `whiny_transitions` is enabled and never runs
+  around callbacks).
+* An exception raised **before** `proceed` commits propagates unchanged and
+  the transition never happened. An exception raised **after** the transition
+  was already committed (typically in post-`proceed` code of an outer layer)
+  is wrapped in `AASM::TransitionCommittedError`, which exposes `#cause` /
+  `#original_error`, `#originating_state`, `#current_state` and `#object`.
+* Inherited state machines keep their parent's global around callbacks and
+  add their own afterwards; named state machines keep independent around
+  chains; reentrant events (an event fired from inside a callback) get their
+  own nested chain and restore the outer event context afterwards.
 
 #### The current event triggered
 

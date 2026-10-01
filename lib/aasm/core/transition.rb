@@ -8,7 +8,7 @@ module AASM::Core
     alias_method :options, :opts
 
     def initialize(event, opts, &block)
-      add_options_from_dsl(opts, [:on_transition, :guard, :after, :success], &block) if block
+      add_options_from_dsl(opts, [:on_transition, :guard, :after, :success, :around_transition], &block) if block
 
       @event = event
       @from = opts[:from]
@@ -26,6 +26,8 @@ module AASM::Core
 
       @success = Array(opts[:success])
       @success = @success[0] if @success.size == 1
+
+      @around = Array(opts[:around_transition])
 
       @opts = opts
     end
@@ -59,6 +61,10 @@ module AASM::Core
 
     def invoke_success_callbacks(obj, *args)
       _fire_callbacks(@success, obj, args)
+    end
+
+    def around_callbacks
+      @around
     end
 
     private

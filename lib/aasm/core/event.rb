@@ -10,7 +10,10 @@ module AASM::Core
       @name = name
       @state_machine = state_machine
       @transitions = []
-      @valid_transitions = Hash.new { |h, k| h[k] = {} }
+      # stack of per-fire transition contexts per object id, so reentrant
+      # events (an event fired from within another transition) don't clobber
+      # the outer fire's selected transition
+      @valid_transitions = Hash.new { |h, k| h[k] = [] }
       @guards = Array(options[:guard] || options[:guards] || options[:if])
       @unless = Array(options[:unless]) #TODO: This could use a better name
       @default_display_name = name.to_s.gsub(/_/, ' ').capitalize
@@ -27,6 +30,7 @@ module AASM::Core
         :error,
         :before_success,
         :success,
+        :around_transition,
       ], &block) if block
     end
 
@@ -77,11 +81,17 @@ module AASM::Core
       invoke_callbacks(@options[callback_name], record, args)
     end
 
-    def fire_transition_callbacks(obj, *args)
-      from_state = obj.aasm(state_machine.name).current_state
-      transition = @valid_transitions[obj.object_id][from_state]
-      transition.invoke_success_callbacks(obj, *args) if transition
-      @valid_transitions.delete(obj.object_id)
+    def fire_transition_callbacks(obj, token, *args)
+      context = transition_context(obj, token)
+      context[:transition].invoke_success_callbacks(obj, *args) if context
+    end
+
+    # Pops the transition context that belongs to the given fire token.
+    def release_transition_context(obj, token)
+      stack = @valid_transitions[obj.object_id]
+      index = stack.rindex { |context| context[:token] == token }
+      stack.delete_at(index) if index
+      @valid_transitions.delete(obj.object_id) if stack.empty?
     end
 
     def ==(event)
@@ -154,7 +164,10 @@ module AASM::Core
             result = transition
           else
             result = to_state || Array(transition.to).first
-            Array(transition.to).each {|to| @valid_transitions[obj.object_id][to] = transition }
+            @valid_transitions[obj.object_id] << {
+              token: options[:fire_token],
+              transition: transition,
+            }
             transition.execute(obj, *args)
           end
 
@@ -173,6 +186,11 @@ module AASM::Core
       Invoker.new(code, record, args)
              .with_default_return_value(false)
              .invoke
+    end
+
+    def transition_context(obj, token)
+      stack = @valid_transitions[obj.object_id]
+      stack && stack.reverse.find { |context| context[:token] == token }
     end
   end
 end # AASM

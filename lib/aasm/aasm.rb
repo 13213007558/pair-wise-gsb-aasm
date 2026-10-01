@@ -96,17 +96,38 @@ private
 
   def aasm_fire_event(state_machine_name, event_name, options, *args, &block)
     event = self.class.aasm(state_machine_name).state_machine.events[event_name]
+    fire_token = Object.new
     begin
       old_state = aasm(state_machine_name).state_object_for_name(aasm(state_machine_name).current_state)
 
       fire_default_callbacks(event, *process_args(event, aasm(state_machine_name).current_state, *args))
 
       if may_fire_to = event.may_fire?(self, *args)
-        fire_exit_callbacks(old_state, *process_args(event, aasm(state_machine_name).current_state, *args))
-        if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
-          aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
+        processed_args = process_args(event, aasm(state_machine_name).current_state, *args)
+        # around_transition callbacks are gathered now that guards have passed
+        around_callbacks = Array(event.state_machine.global_callbacks[:around_all_transitions]) +
+                           Array(event.options[:around_transition]) +
+                           Array(may_fire_to.around_callbacks)
+        around_chain = AASM::Core::AroundChain.new(
+          self,
+          event.state_machine,
+          around_callbacks,
+          processed_args
+        ) do
+          fire_exit_callbacks(old_state, *processed_args)
+          new_state_name = event.fire(self, {:may_fire => may_fire_to, :fire_token => fire_token}, *args)
+          new_state_name ?
+            aasm_fired(state_machine_name, event, old_state, new_state_name, options, fire_token, *args, &block) :
+            false
+        end
+
+        result = around_chain.run
+        if result == false && !around_chain.committed?
+          # cancelled by an around_transition callback not calling proceed,
+          # or persistence of the new state failed
+          false
         else
-          aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
+          result
         end
       else
         aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
@@ -117,6 +138,7 @@ private
       raise(e)
       false
     ensure
+      event.release_transition_context(self, fire_token)
       event.fire_callbacks(:ensure, self, *process_args(event, aasm(state_machine_name).current_state, *args))
       event.fire_global_callbacks(:ensure_on_all_events, self, *process_args(event, aasm(state_machine_name).current_state, *args))
     end
@@ -142,7 +164,7 @@ private
     old_state.fire_callbacks(:exit, self, *processed_args)
   end
 
-  def aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args)
+  def aasm_fired(state_machine_name, event, old_state, new_state_name, options, fire_token, *args)
     persist = options[:persist]
 
     new_state = aasm(state_machine_name).state_object_for_name(new_state_name)
@@ -158,7 +180,7 @@ private
       if persist_successful
         yield if block_given?
         event.fire_callbacks(:before_success, self, *callback_args)
-        event.fire_transition_callbacks(self, *process_args(event, old_state.name, *args))
+        event.fire_transition_callbacks(self, fire_token, *process_args(event, old_state.name, *args))
         event.fire_callbacks(:success, self, *callback_args)
       end
     else
