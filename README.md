@@ -16,6 +16,7 @@
   - [Transitions](#transitions)
   - [Multiple state machines per class](#multiple-state-machines-per-class)
     - [Handling naming conflicts between multiple state machines](#handling-naming-conflicts-between-multiple-state-machines)
+    - [Joint events](#joint-events)
     - [Binding event](#binding-event)
   - [Auto-generated Status Constants](#auto-generated-status-constants)
   - [Extending AASM](#extending-aasm)
@@ -592,6 +593,85 @@ So, for example, to use inspection on a class level, you have to use
 SimpleMultipleExample.aasm(:move).states.map(&:name)
 # => [:standing, :walking, :running]
 ```
+
+#### Joint events
+
+When an object carries several state machines (think of an order with a
+`payment` and a `delivery` machine), some business actions must change all of
+them together. Firing the individual events one after another is not atomic:
+if the second event's guard rejects, the first machine has already transitioned.
+
+A joint event couples one event on each of several state machines into a
+single atomic operation. All guards are checked first - against the
+consistent pre-event state - and only then all state changes are committed
+together:
+
+```ruby
+class Order
+  include AASM
+
+  aasm(:payment) do
+    state :unpaid, initial: true
+    state :paid
+
+    event :pay do
+      transitions from: :unpaid, to: :paid
+    end
+  end
+
+  aasm(:delivery) do
+    state :pending, initial: true
+    state :shipped
+
+    event :ship do
+      transitions from: :pending, to: :shipped
+    end
+  end
+
+  aasm_joint_event :confirm_shipment, payment: :pay, delivery: :ship
+end
+
+order = Order.new
+order.may_confirm_shipment? # => true
+order.confirm_shipment      # commits both machines, or neither
+order.aasm(:payment).current_state  # => :paid
+order.aasm(:delivery).current_state # => :shipped
+```
+
+A joint event defines `my_event`, `my_event!` and `may_my_event?` like a
+regular event. Firing happens in three phases:
+
+1. **checks** - all `before` callbacks run and all guards are evaluated
+   against the consistent pre-event state. If anything fails here, no machine
+   is changed at all and no success callback is fired. With
+   `whiny_transitions` enabled an `AASM::InvalidTransition` error is raised,
+   otherwise `false` is returned.
+2. **commit** - the new state is written on every involved machine.
+3. **cleanup** - all remaining callbacks (state enter/exit, transition,
+   `success`, `after`) run. A failure here is reported through the `error`
+   callbacks with the states already committed; committed states are never
+   rolled back and arbitrary external side effects are not undone.
+
+The callback order is (targets in declaration order): joint `before`,
+per-event `before_all_events`/`before`, all guard checks, per-event state
+exit callbacks, the commit, per-event enter/transition/success callbacks,
+per-event `after`/`after_all_events`, joint `success`/`after`, and finally
+the `ensure` callbacks. On errors, the per-event `error`/`error_on_all_events`
+callbacks run first, then the joint `error` callback.
+
+Joint-level callbacks can be declared with a block:
+
+```ruby
+aasm_joint_event :confirm_shipment, { payment: :pay, delivery: :ship },
+                 ensure: -> { track_attempt } do
+  before { lock_inventory }
+  success { notify_customer }
+  error { |error| report(error) }
+end
+```
+
+Joint events currently cover plain Ruby objects; persistence backends
+(ActiveRecord, Sequel, ...) are not supported yet.
 
 ### Binding event
 

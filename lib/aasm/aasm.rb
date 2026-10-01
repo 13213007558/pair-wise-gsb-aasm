@@ -62,6 +62,33 @@ module AASM
       @aasm[state_machine_name].instance_eval(&block) if block # new DSL
       @aasm[state_machine_name]
     end
+
+    # define a joint event, coupling one event on each of several state
+    # machines of this class into a single atomic operation:
+    #
+    #   aasm_joint_event :confirm_shipment, :payment => :pay, :delivery => :ship
+    #
+    # all guards are checked against the consistent pre-event state first;
+    # only then all state changes are committed together. optional joint-level
+    # callbacks (:before, :success, :after, :error, :ensure) can be given as
+    # options or via a block.
+    def aasm_joint_event(name, targets, options = {}, &block)
+      joint_event = AASM::Core::JointEvent.new(name, targets, options, &block)
+
+      define_method(name) do |*args|
+        aasm_fire_joint_event(joint_event, {:persist => false}, *args)
+      end
+
+      define_method(:"#{name}!") do |*args|
+        aasm_fire_joint_event(joint_event, {:persist => true}, *args)
+      end
+
+      define_method(:"may_#{name}?") do |*args|
+        joint_event.may_fire?(self, *args)
+      end
+
+      joint_event
+    end
   end # ClassMethods
 
   # this is the entry point for all instance-level access to AASM
@@ -203,6 +230,132 @@ private
     else
       false
     end
+  end
+
+  # fires a joint event (see AASM::Core::JointEvent) in three phases:
+  #
+  # 1. checks - run all before-callbacks and evaluate all guards against
+  #    the consistent pre-event state. Any failure here (including a
+  #    rejected guard on any machine) leaves every machine untouched and
+  #    no success callback is fired.
+  # 2. commit - write the new state on every involved machine.
+  # 3. cleanup - run all remaining callbacks. A failure here is reported
+  #    through the error callbacks with the states already committed;
+  #    committed states are never rolled back and arbitrary external
+  #    side effects are not undone.
+  #
+  # callback order (targets in declaration order):
+  #   joint :before
+  #   per event: :before_all_events, :before
+  #   per event: guard checks (all before any state change)
+  #   per event: old state :before_exit, :exit
+  #   per event: state commit
+  #   per event: new state :before_enter, :enter, transition :after,
+  #              :before_success, transition :success, :success
+  #   per event: old state :after_exit, new state :after_enter, :after,
+  #              :after_all_events
+  #   joint :success, :after
+  #   per event: :ensure, :ensure_on_all_events, then joint :ensure
+  # on error: per event :error, :error_on_all_events, then joint :error
+  def aasm_fire_joint_event(joint_event, options, *args)
+    persist = options[:persist]
+    plans = joint_event.resolve(self).map do |machine_name, event|
+      {:machine => machine_name, :event => event}
+    end
+
+    begin
+      joint_event.fire_callbacks(:before, self, *args)
+
+      # phase 1: checks - before-callbacks and guards for every target,
+      # all evaluated against the untouched pre-event state
+      plans.each do |plan|
+        aasm(plan[:machine]).current_event = persist ? :"#{plan[:event].name}!" : plan[:event].name
+        fire_default_callbacks(plan[:event], *args)
+      end
+
+      plans.each do |plan|
+        plan[:old_state] = aasm(plan[:machine]).state_object_for_name(aasm(plan[:machine]).current_state)
+        plan[:transition] = plan[:event].may_fire?(self, *args)
+      end
+
+      return aasm_joint_failed(joint_event, plans) if plans.any? { |plan| !plan[:transition] }
+
+      plans.each do |plan|
+        plan[:new_state_name] = Array(plan[:transition].to).first
+        plan[:new_state] = aasm(plan[:machine]).state_object_for_name(plan[:new_state_name])
+        fire_exit_callbacks(plan[:old_state], *args)
+      end
+
+      # phase 2: commit all state changes
+      plans.each do |plan|
+        if persist
+          plan[:committed] = aasm(plan[:machine]).set_current_state_with_persistence(plan[:new_state_name])
+        else
+          aasm(plan[:machine]).current_state = plan[:new_state_name]
+          plan[:committed] = true
+        end
+      end
+
+      # phase 3: post-commit callbacks - failures from here on are reported
+      # via the error callbacks, but committed states are not rolled back
+      plans.each do |plan|
+        plan[:new_state].fire_callbacks(:before_enter, self, *args)
+        plan[:new_state].fire_callbacks(:enter, self, *args)
+        plan[:transition].execute(self, *args)
+        next unless plan[:committed]
+        plan[:event].fire_callbacks(:before_success, self, *args)
+        plan[:transition].invoke_success_callbacks(self, *args)
+        plan[:event].fire_callbacks(:success, self, *args)
+      end
+
+      plans.each do |plan|
+        if plan[:committed]
+          plan[:old_state].fire_callbacks(:after_exit, self, *args)
+          plan[:new_state].fire_callbacks(:after_enter, self, *args)
+          plan[:event].fire_callbacks(:after, self, *args)
+          plan[:event].fire_global_callbacks(:after_all_events, self, *args)
+          self.aasm_event_fired(plan[:event].name, plan[:old_state].name, aasm(plan[:machine]).current_state) if self.respond_to?(:aasm_event_fired)
+        else
+          self.aasm_event_failed(plan[:event].name, plan[:old_state].name) if self.respond_to?(:aasm_event_failed)
+        end
+      end
+
+      joint_event.fire_callbacks(:success, self, *args)
+      joint_event.fire_callbacks(:after, self, *args)
+
+      plans.all? { |plan| plan[:committed] }
+    rescue StandardError => e
+      handled = plans.any? do |plan|
+        plan[:event].fire_callbacks(:error, self, e, *args) ||
+        plan[:event].fire_global_callbacks(:error_on_all_events, self, e, *args)
+      end
+      handled = joint_event.fire_callbacks(:error, self, e, *args) || handled
+      raise(e) unless handled
+      false
+    ensure
+      plans.each do |plan|
+        plan[:event].fire_callbacks(:ensure, self, *args)
+        plan[:event].fire_global_callbacks(:ensure_on_all_events, self, *args)
+      end
+      joint_event.fire_callbacks(:ensure, self, *args)
+    end
+  end
+
+  def aasm_joint_failed(joint_event, plans)
+    failed_plans = plans.select { |plan| !plan[:transition] }
+
+    if self.respond_to?(:aasm_event_failed)
+      failed_plans.each { |plan| self.aasm_event_failed(plan[:event].name, plan[:old_state].name) }
+    end
+
+    whiny = failed_plans.any? do |plan|
+      AASM::StateMachineStore.fetch(self.class, true).machine(plan[:machine]).config.whiny_transitions
+    end
+    if whiny
+      first_failure = failed_plans.first
+      raise AASM::InvalidTransition.new(self, joint_event.name, first_failure[:machine], first_failure[:event].failed_callbacks)
+    end
+    false
   end
 
 end

@@ -2,6 +2,7 @@
 
 ## unreleased
 * typo fixes, thanks @kumar-mithlesh [#870](https://github.com/aasm/aasm/pull/870)
+* Add `aasm_joint_event` to atomically fire one event on each of several state machines of the same object: all guards are checked against the consistent pre-event state before any state change is committed (plain Ruby objects only, for now)
 
 ## 6.0.0 (5 July 2026)
 * Let `whiny_persistence: true` be the default now [#378](https://github.com/aasm/aasm/pull/378)
