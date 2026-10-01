@@ -20,8 +20,40 @@ module AASM
     # make sure inheritance (aka subclassing) works with AASM
     def inherited(base)
       AASM::StateMachineStore.register(base, self)
+      base.instance_variable_set(:@aasm_joint_events, aasm_joint_events.dup)
 
       super
+    end
+
+    # define a joint event spanning several state machines of this class.
+    #
+    #   aasm_joint_event :confirm_shipment, { :payment => :pay, :delivery => :ship } do
+    #     before { ... }
+    #     after  { ... }
+    #     error  { |e| ... }
+    #   end
+    #
+    # defines the instance methods +confirm_shipment+ and +may_confirm_shipment?+.
+    # All participant guards are checked first (against the consistent
+    # pre-event state); only if every participant may fire are the state
+    # changes committed.
+    def aasm_joint_event(name, participants, options = {}, &block)
+      joint_event = AASM::Core::JointEvent.new(name, participants, options, &block)
+      aasm_joint_events[joint_event.name] = joint_event
+
+      define_method("may_#{joint_event.name}?") do |*args|
+        self.class.aasm_joint_events[joint_event.name].may_fire?(self, *args)
+      end
+
+      define_method(joint_event.name) do |*args|
+        self.class.aasm_joint_events[joint_event.name].fire(self, *args)
+      end
+
+      joint_event
+    end
+
+    def aasm_joint_events
+      @aasm_joint_events ||= {}
     end
 
     # this is the entry point for all state and event definitions
@@ -101,7 +133,9 @@ private
 
       fire_default_callbacks(event, *process_args(event, aasm(state_machine_name).current_state, *args))
 
-      if may_fire_to = event.may_fire?(self, *args)
+      # a pre-resolved transition (e.g. from a joint event) is used as-is,
+      # so that guards are not re-evaluated against an already changed state
+      if may_fire_to = (options[:resolved_transition] || event.may_fire?(self, *args))
         fire_exit_callbacks(old_state, *process_args(event, aasm(state_machine_name).current_state, *args))
         if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
           aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)

@@ -17,6 +17,7 @@
   - [Multiple state machines per class](#multiple-state-machines-per-class)
     - [Handling naming conflicts between multiple state machines](#handling-naming-conflicts-between-multiple-state-machines)
     - [Binding event](#binding-event)
+    - [Joint events across state machines](#joint-events-across-state-machines)
   - [Auto-generated Status Constants](#auto-generated-status-constants)
   - [Extending AASM](#extending-aasm)
   - [ActiveRecord](#activerecord)
@@ -632,6 +633,67 @@ example.ask
 example.aasm(:work).current_state #=> :processing
 example.aasm(:question).current_state #=> :asked
 ```
+
+### Joint events across state machines
+
+When one logical action has to change several state machines of the same
+object (e.g. `payment` and `delivery` of an order), firing the two events
+one after another is not atomic: if the second event's guard fails, the
+first machine has already changed its state. A joint event checks all
+participants first and only then commits the state changes:
+
+```ruby
+class Order
+  include AASM
+
+  aasm(:payment) do
+    state :unpaid, initial: true
+    state :paid
+
+    event :pay do
+      transitions from: :unpaid, to: :paid
+    end
+  end
+
+  aasm(:delivery) do
+    state :pending, initial: true
+    state :shipped
+
+    event :ship do
+      transitions from: :pending, to: :shipped, guard: :in_stock?
+    end
+  end
+
+  aasm_joint_event :confirm_shipment, { payment: :pay, delivery: :ship } do
+    before { ... }
+    after  { ... }
+    error  { |error| ... }
+  end
+end
+
+order = Order.new
+order.may_confirm_shipment? # => true, if every participant may fire
+order.confirm_shipment      # commits :payment and :delivery together
+```
+
+Firing a joint event is a two-phase process:
+
+1. **check** - the transition of every participant is resolved first. All
+   guards run against the same, consistent pre-event state of every
+   machine, and nothing is changed yet. If any participant refuses, the
+   joint `error` callbacks run and no machine has been touched: no state
+   changes and no success callbacks of any participant. Depending on the
+   `whiny_transitions` configuration of the refusing machine, an
+   `AASM::InvalidTransition` error is raised or `false` is returned.
+2. **commit** - the state changes of all participants are committed one
+   machine after another. Joint `before` callbacks run before the first
+   commit, joint `after` callbacks after the last one. If a callback
+   raises during or after the commit, the joint `error` callbacks run and
+   the exception is re-raised; state changes already committed stay
+   committed (the current states report what has been committed) and
+   arbitrary external side effects are not rolled back.
+
+Joint events currently support plain Ruby objects.
 
 ### Auto-generated Status Constants
 
