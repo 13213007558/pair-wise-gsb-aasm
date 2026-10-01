@@ -461,6 +461,40 @@ event :abort do
 end
 ```
 
+To choose the destination dynamically, declare every allowed target in `to` and provide a
+`resolver`. The resolver runs after the transition guards pass and must return one of the
+declared targets. Positional and keyword event arguments are passed to both guards and the
+resolver. An unknown target or an exception raised by the resolver prevents the event from
+leaving its original state. Asking `may_event?` evaluates the resolver, but that result is
+not reused by a later event call.
+
+```ruby
+class Review
+  include AASM
+
+  aasm do
+    state :pending, initial: true
+    state :approved
+    state :manual_review
+
+    event :review do
+      transitions from: :pending,
+                   to: [:approved, :manual_review],
+                   resolver: :resolve_review_target
+    end
+  end
+
+  def resolve_review_target(decision:)
+    decision == :approve ? :approved : :manual_review
+  end
+end
+
+review = Review.new
+review.review(decision: :approve) # => approved
+```
+
+A static `to` value without `resolver` keeps choosing its first target by default, as before.
+
 ### Display name for state
 
 You can define display name for state using :display option

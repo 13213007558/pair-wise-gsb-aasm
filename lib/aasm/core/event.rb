@@ -4,13 +4,14 @@ module AASM::Core
   class Event
     include AASM::DslHelper
 
+    Selection = Struct.new(:transition, :target, keyword_init: true)
+
     attr_reader :name, :state_machine, :options, :default_display_name
 
     def initialize(name, state_machine, options = {}, &block)
       @name = name
       @state_machine = state_machine
       @transitions = []
-      @valid_transitions = Hash.new { |h, k| h[k] = {} }
       @guards = Array(options[:guard] || options[:guards] || options[:if])
       @unless = Array(options[:unless]) #TODO: This could use a better name
       @default_display_name = name.to_s.gsub(/_/, ' ').capitalize
@@ -43,12 +44,20 @@ module AASM::Core
     # a neutered version of fire - it doesn't actually fire the event, it just
     # executes the transition guards to determine if a transition is even
     # an option given current conditions.
-    def may_fire?(obj, to_state=::AASM::NO_VALUE, *args)
-      _fire(obj, {:test_only => true}, to_state, *args) # true indicates test firing
+    def may_fire?(obj, *args)
+      select_transition(obj, *args)
     end
 
-    def fire(obj, options={}, to_state=::AASM::NO_VALUE, *args)
-      _fire(obj, options, to_state, *args) # false indicates this is not a test (fire!)
+    def fire(obj, options={}, *args)
+      selection = options[:selection] || select_transition(obj, *args)
+      return nil unless selection
+
+      callback_args = args.dup
+      if callback_args.first.respond_to?(:to_sym) && callback_args.first.to_sym == selection.target
+        callback_args.shift
+      end
+      selection.transition.execute_with_target(obj, selection.target, *callback_args)
+      selection.target
     end
 
     def transitions_from_state?(state)
@@ -64,7 +73,7 @@ module AASM::Core
     end
 
     def transitions_to_state(state)
-      @transitions.select { |t| t.to == state }
+      @transitions.select { |t| Array(t.to).include?(state) }
     end
 
     def fire_global_callbacks(callback_name, record, *args)
@@ -77,11 +86,8 @@ module AASM::Core
       invoke_callbacks(@options[callback_name], record, args)
     end
 
-    def fire_transition_callbacks(obj, *args)
-      from_state = obj.aasm(state_machine.name).current_state
-      transition = @valid_transitions[obj.object_id][from_state]
-      transition.invoke_success_callbacks(obj, *args) if transition
-      @valid_transitions.delete(obj.object_id)
+    def fire_transition_callbacks(obj, selection, *args)
+      selection&.transition&.invoke_success_callbacks(obj, *args)
     end
 
     def ==(event)
@@ -100,7 +106,7 @@ module AASM::Core
           @transitions << AASM::Core::Transition.new(self, attach_event_guards(definitions.merge(:from => s.to_sym)), &block)
         end
         # Create a transition if :to is specified without :from (transitions from ANY state)
-        if !definitions[:from] && definitions[:to]
+        if !definitions[:from] && (definitions[:to] || definitions[:resolver])
           @transitions << AASM::Core::Transition.new(self, attach_event_guards(definitions), &block)
         end
       end
@@ -129,39 +135,36 @@ module AASM::Core
       definitions
     end
 
-    def _fire(obj, options={}, to_state=::AASM::NO_VALUE, *args)
-      result = options[:test_only] ? false : nil
+    def select_transition(obj, *args)
       clear_failed_callbacks
       transitions = @transitions.select { |t| t.from == obj.aasm(state_machine.name).current_state || t.from == nil}
-      return result if transitions.size == 0
+      return nil if transitions.size == 0
 
-      if to_state == ::AASM::NO_VALUE
-        to_state = nil
-      elsif !(to_state.respond_to?(:to_sym) && transitions.map(&:to).flatten.include?(to_state.to_sym))
-        # to_state is an argument
-        args.unshift(to_state)
-        to_state = nil
+      event_args = args.dup
+      to_state = nil
+      if event_args.first.respond_to?(:to_sym) && transitions.flat_map(&:allowed_targets).include?(event_args.first.to_sym)
+        to_state = event_args.shift.to_sym
       end
-      
+
       # nop, to_state is a valid to-state
 
       transitions.each do |transition|
-        next if to_state and !Array(transition.to).include?(to_state)
-        if (options.key?(:may_fire) && transition.eql?(options[:may_fire])) ||
-           (!options.key?(:may_fire) && transition.allowed?(obj, *args))
+        requested_target = to_state if to_state && transition.allowed_targets.include?(to_state)
+        next if to_state && requested_target.nil?
 
-          if options[:test_only]
-            result = transition
-          else
-            result = to_state || Array(transition.to).first
-            Array(transition.to).each {|to| @valid_transitions[obj.object_id][to] = transition }
-            transition.execute(obj, *args)
-          end
-
-          break
+        if transition.allowed?(obj, *event_args)
+          target = transition.resolve_target(obj, requested_target, *event_args)
+          set_transition_context(obj, transition.from, target)
+          return Selection.new(transition: transition, target: target)
         end
       end
-      result
+      nil
+    end
+
+    def set_transition_context(obj, from_state, to_state)
+      aasm = obj.aasm(state_machine.name)
+      aasm.from_state = from_state if aasm.respond_to?(:from_state=)
+      aasm.to_state = to_state if aasm.respond_to?(:to_state=)
     end
 
     def clear_failed_callbacks
@@ -174,5 +177,7 @@ module AASM::Core
              .with_default_return_value(false)
              .invoke
     end
+
+    ruby2_keywords :may_fire?, :fire, :select_transition if respond_to?(:ruby2_keywords, true)
   end
 end # AASM
