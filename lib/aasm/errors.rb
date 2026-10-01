@@ -19,4 +19,6 @@ module AASM
   class UndefinedState < RuntimeError; end
   class UndefinedEvent < UndefinedState; end
   class NoDirectAssignmentError < RuntimeError; end
+  class EventReceiptConflict < RuntimeError; end
+  class EventReceiptReentry < ThreadError; end
 end

@@ -763,6 +763,74 @@ job.aasm.fire(:run) # not saved
 job.aasm.fire!(:run) # saved
 ```
 
+### Event receipts
+
+For redelivered messages, AASM can execute a bang event through an optional
+receipt keyed by the caller-provided `event_id`. The receipt is scoped to one
+object and one state machine. A repeated call with the same arguments returns
+the first receipt and does not execute the transition or success callbacks
+again. The in-memory store is process-local and intended for tests and
+prototyping; it is not a database-backed implementation.
+
+```ruby
+class Job
+  include AASM
+
+  aasm do
+    state :sleeping, initial: true
+    state :running
+
+    event :run do
+      success :notify_job_started
+      transitions from: :sleeping, to: :running
+    end
+  end
+end
+
+job = Job.new
+store = AASM::EventReceiptStore::Memory.new
+
+receipt = job.aasm.fire_with_receipt!(:run, operator_id: 42, event_id: "message-1", store: store)
+receipt.status # => :committed
+
+redelivery = job.aasm.fire_with_receipt!(:run, operator_id: 42, event_id: "message-1", store: store)
+redelivery == receipt
+redelivery.attempts # => 2
+```
+
+Receipt statuses are:
+
+- `:not_accepted`: the event was not allowed or did not persist successfully.
+- `:in_progress`: another identical call is executing.
+- `:committed`: the state was persisted and post-commit callbacks completed.
+- `:post_commit_callback_failed`: the state was committed, but a callback after persistence raised.
+
+The receipt binds the event name and a digest of positional and keyword
+arguments. Reusing an `event_id` with different input raises
+`AASM::EventReceiptConflict`.
+
+A store can be supplied per call, or configured on a state machine:
+
+```ruby
+aasm event_receipt_store: AASM::EventReceiptStore::Memory.new do
+  # ...
+end
+```
+
+A custom store must implement:
+
+```ruby
+claim(request_hash)               # returns an AASM::EventReceipt
+mark(receipt, status, attributes) # marks the terminal state
+find(object_key:, state_machine_name:, event_id:)
+```
+
+`claim` must serialize concurrent identical requests, increment the returned
+receipt's `attempts` for a duplicate, reject a mismatched arguments digest,
+and wait until the first call finishes. Override
+`#aasm_event_receipt_object_key` on the state-machine object to use a stable
+database identifier in a future persistent store.
+
 Saving includes running all validations on the `Job` class. If
 `whiny_persistence` flag is set to `true`, exception is raised in case of
 failure. If `whiny_persistence` flag is set to `false`, methods with a bang return

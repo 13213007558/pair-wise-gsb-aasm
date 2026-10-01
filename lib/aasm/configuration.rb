@@ -41,8 +41,19 @@ module AASM
     # Configure a logger, with default being a Logger to STDERR
     attr_accessor :logger
 
+    # Store used for optional idempotent event receipts
+    attr_accessor :event_receipt_store
+
     class << self
       attr_accessor :hide_warnings
+
+      def default_event_receipt_store
+        @default_event_receipt_store ||= AASM::EventReceiptStore::Memory.new
+      end
+
+      def reset_default_event_receipt_store!
+        @default_event_receipt_store = nil
+      end
     end
   end
 end

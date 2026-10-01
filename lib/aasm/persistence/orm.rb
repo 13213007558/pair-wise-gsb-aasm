@@ -120,14 +120,22 @@ module AASM
 
       # Returns true if event was fired successfully and transaction completed.
       def aasm_fire_event(state_machine_name, name, options, *args, &block)
+        event = self.class.aasm(state_machine_name).state_machine.events[name]
+        receipt = options[:event_receipt]
+        receipt_store = options[:event_receipt_store]
         return super unless aasm_supports_transactions? && options[:persist]
 
-        event = self.class.aasm(state_machine_name).state_machine.events[name]
-        event.fire_callbacks(:before_transaction, self, *args)
-        event.fire_global_callbacks(:before_all_transactions, self, *args)
+        defer_post_commit = !!receipt
+        options[:event_receipt_defer_post_commit] = !!defer_post_commit
+        transaction_callbacks_started = false
+        success = false
 
         begin
-          success = if options[:persist] && use_transactions?(state_machine_name)
+          event.fire_callbacks(:before_transaction, self, *args)
+          event.fire_global_callbacks(:before_all_transactions, self, *args)
+          transaction_callbacks_started = true
+
+          success = if use_transactions?(state_machine_name)
             aasm_transaction(requires_new?(state_machine_name), requires_lock?(state_machine_name)) do
               super
             end
@@ -143,9 +151,49 @@ module AASM
           end
 
           success
+        rescue StandardError => error
+          if receipt && receipt_store && !receipt.terminal?
+            receipt.begin_post_commit if success
+            receipt_store.mark(
+              receipt,
+              success ? :post_commit_callback_failed : :not_accepted,
+              result: success,
+              error: error
+            )
+          end
+          raise
         ensure
-          event.fire_callbacks(:after_transaction, self, *args)
-          event.fire_global_callbacks(:after_all_transactions, self, *args)
+          begin
+            if transaction_callbacks_started
+              event.fire_callbacks(:after_transaction, self, *args)
+              event.fire_global_callbacks(:after_all_transactions, self, *args)
+            end
+          rescue StandardError => error
+            if receipt && receipt_store && success && !receipt.terminal?
+              receipt.begin_post_commit
+              receipt_store.mark(
+                receipt,
+                :post_commit_callback_failed,
+                result: true,
+                error: error
+              )
+            end
+            raise
+          end
+
+          if receipt && receipt_store && !receipt.terminal?
+            if success
+              receipt.begin_post_commit
+              receipt_store.mark(
+                receipt,
+                :committed,
+                result: true,
+                to_state: aasm(state_machine_name).current_state
+              )
+            else
+              receipt_store.mark(receipt, :not_accepted, result: false)
+            end
+          end
         end
       end
 

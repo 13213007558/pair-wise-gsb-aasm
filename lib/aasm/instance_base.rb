@@ -124,6 +124,53 @@ module AASM
       @instance.send(bang_event_name, *args, &block)
     end
 
+    def fire_with_receipt!(event_name, *args, event_id:, store: nil, **keyword_arguments, &block)
+      event_exists?(event_name, true)
+      event_id = event_id.to_s
+      raise ArgumentError, 'event_id is required' if event_id.empty?
+
+      receipt_store = store || event_receipt_config_store
+      receipt = receipt_store.claim(
+        event_id: event_id,
+        object_key: @instance.send(:aasm_event_receipt_object_key),
+        state_machine_name: @name,
+        event_name: event_name.to_sym,
+        arguments_fingerprint: AASM::EventReceipt.argument_fingerprint(
+          event_name, args, keyword_arguments, block
+        )
+      )
+
+      return receipt if receipt.attempts > 1
+
+      bang_event_name = "#{event_method_name(event_name)}!".to_sym
+      begin
+        self.current_event = "#{event_name}!".to_sym
+
+        options = {
+          persist: true,
+          event_receipt: receipt,
+          event_receipt_store: receipt_store,
+          event_receipt_defer_post_commit: false
+        }
+        result = @instance.send(
+          :aasm_fire_event,
+          @name,
+          event_name.to_sym,
+          options,
+          *args,
+          **keyword_arguments,
+          &block
+        )
+        finalize_receipt(receipt, receipt_store, result)
+        receipt
+      rescue StandardError => error
+        finalize_receipt(receipt, receipt_store, false, error)
+        receipt
+      ensure
+        self.current_event = nil
+      end
+    end
+
     def set_current_state_with_persistence(state)
       save_success = @instance.aasm_write_state(state, @name)
       self.current_state = state if save_success
@@ -131,6 +178,27 @@ module AASM
     end
 
     private
+
+    def event_receipt_config_store
+      @instance.class.aasm(@name).state_machine.config.event_receipt_store ||
+        AASM::Configuration.default_event_receipt_store
+    end
+
+    def finalize_receipt(receipt, receipt_store, result, error = nil)
+      return unless receipt && receipt_store && !receipt.terminal?
+
+      if result
+        receipt.begin_post_commit
+        receipt_store.mark(receipt, :committed, result: true)
+      else
+        receipt_store.mark(
+          receipt,
+          :not_accepted,
+          result: false,
+          error: error
+        )
+      end
+    end
 
     def event_method_name(event_name)
       config = @instance.class.aasm(@name).state_machine.config

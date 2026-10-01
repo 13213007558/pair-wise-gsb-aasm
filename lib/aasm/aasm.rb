@@ -80,6 +80,10 @@ module AASM
 
 private
 
+  def aasm_event_receipt_object_key
+    object_id
+  end
+
   # Takes args and a from state and removes the first
   # element from args if it is a valid to_state for
   # the event given the from_state
@@ -96,29 +100,70 @@ private
 
   def aasm_fire_event(state_machine_name, event_name, options, *args, &block)
     event = self.class.aasm(state_machine_name).state_machine.events[event_name]
+    receipt = options[:event_receipt]
+    receipt_store = options[:event_receipt_store]
+    defer_post_commit = options[:event_receipt_defer_post_commit]
+    result = nil
+
     begin
       old_state = aasm(state_machine_name).state_object_for_name(aasm(state_machine_name).current_state)
+      receipt.from_state = old_state.name if receipt
 
       fire_default_callbacks(event, *process_args(event, aasm(state_machine_name).current_state, *args))
 
       if may_fire_to = event.may_fire?(self, *args)
         fire_exit_callbacks(old_state, *process_args(event, aasm(state_machine_name).current_state, *args))
         if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
-          aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
+          result = aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
         else
-          aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
+          result = aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks, options)
         end
       else
-        aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
+        result = aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks, options)
       end
     rescue StandardError => e
+      mark_event_receipt(receipt, receipt_store, defer_post_commit, false, e)
       event.fire_callbacks(:error, self, e, *process_args(event, aasm(state_machine_name).current_state, *args)) ||
       event.fire_global_callbacks(:error_on_all_events, self, e, *process_args(event, aasm(state_machine_name).current_state, *args)) ||
       raise(e)
       false
     ensure
-      event.fire_callbacks(:ensure, self, *process_args(event, aasm(state_machine_name).current_state, *args))
-      event.fire_global_callbacks(:ensure_on_all_events, self, *process_args(event, aasm(state_machine_name).current_state, *args))
+      begin
+        event.fire_callbacks(:ensure, self, *process_args(event, aasm(state_machine_name).current_state, *args))
+        event.fire_global_callbacks(:ensure_on_all_events, self, *process_args(event, aasm(state_machine_name).current_state, *args))
+      rescue StandardError => ensure_error
+        mark_event_receipt(receipt, receipt_store, defer_post_commit, false, ensure_error)
+        raise
+      end
+
+      if result
+        mark_event_receipt(receipt, receipt_store, defer_post_commit, true)
+      elsif !defer_post_commit
+        mark_event_receipt(receipt, receipt_store, false, false)
+      end
+    end
+  end
+
+  def mark_event_receipt(receipt, receipt_store, deferred, success, error = nil)
+    return unless receipt && receipt_store
+    return if receipt.terminal? || deferred
+
+    if success
+      receipt.begin_post_commit
+      receipt_store.mark(
+        receipt,
+        :committed,
+        result: true,
+        to_state: aasm(receipt.state_machine_name).current_state
+      )
+    else
+      status = receipt.post_commit_started ? :post_commit_callback_failed : :not_accepted
+      receipt_store.mark(
+        receipt,
+        status,
+        result: receipt.post_commit_started ? true : false,
+        error: error
+      )
     end
   end
 
@@ -156,6 +201,8 @@ private
     if persist
       persist_successful = aasm(state_machine_name).set_current_state_with_persistence(new_state_name)
       if persist_successful
+        options[:event_receipt]&.begin_post_commit
+        options[:event_receipt].to_state = new_state_name if options[:event_receipt]
         yield if block_given?
         event.fire_callbacks(:before_success, self, *callback_args)
         event.fire_transition_callbacks(self, *process_args(event, old_state.name, *args))
@@ -193,14 +240,32 @@ private
     persist_successful
   end
 
-  def aasm_failed(state_machine_name, event_name, old_state, failures = [])
+  def aasm_failed(state_machine_name, event_name, old_state, failures = [], options = {})
     if self.respond_to?(:aasm_event_failed)
       self.aasm_event_failed(event_name, old_state.name)
     end
 
     if AASM::StateMachineStore.fetch(self.class, true).machine(state_machine_name).config.whiny_transitions
-      raise AASM::InvalidTransition.new(self, event_name, state_machine_name, failures)
+      error = AASM::InvalidTransition.new(self, event_name, state_machine_name, failures)
+      if options[:event_receipt]
+        mark_event_receipt(
+          options[:event_receipt],
+          options[:event_receipt_store],
+          options[:event_receipt_defer_post_commit],
+          false,
+          error
+        )
+      end
+      raise error
     else
+      if options[:event_receipt]
+        mark_event_receipt(
+          options[:event_receipt],
+          options[:event_receipt_store],
+          options[:event_receipt_defer_post_commit],
+          false
+        )
+      end
       false
     end
   end
